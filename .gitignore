@@ -1,0 +1,31 @@
+# Dependency folders
+node_modules/
+jspm_packages/
+
+# Environment variables (SANGAT PENTING!)
+.env.test
+.env.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Production build (jika nanti menggunakan React/build tool)
+dist/
+build/
