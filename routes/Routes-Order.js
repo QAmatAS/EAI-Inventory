@@ -1,94 +1,119 @@
 const express = require('express');
-const router = express.Router();
-const Menu = require('./../models/Model-Menu'); // Import Model Menu
-const Order = require('./../models/Model-Order'); // Import Model Order
+const router  = express.Router();
+const { Kafka } = require('kafkajs');
+
+const Menu      = require('./../models/Model-Menu');
+const Inventory = require('./../models/Model-Inventory');
+const Order     = require('./../models/Model-Order');
 const { verifyToken, authorize } = require('./../middleware/auth');
 
+// --- KAFKA PRODUCER ---
+const kafka = new Kafka({
+    clientId: 'marioshop-order-service',
+    brokers: (process.env.KAFKA_BROKERS || 'localhost:9092').split(','),
+});
+const producer = kafka.producer();
+
+// Connect producer satu kali saat modul diload
+let producerReady = false;
+(async () => {
+    try {
+        await producer.connect();
+        producerReady = true;
+        console.log('[Order] Kafka producer terhubung.');
+    } catch (err) {
+        console.error('[Order] Gagal menghubungkan Kafka producer:', err.message);
+    }
+})();
+
+// --- CHECKOUT ROUTE ---
 router.post('/checkout', verifyToken, authorize(['admin', 'cashier']), async (req, res) => {
     try {
         const { daftarItem, metodePembayaran } = req.body;
+
+        if (!daftarItem || !Array.isArray(daftarItem) || daftarItem.length === 0) {
+            return res.status(400).json({ message: 'daftarItem tidak boleh kosong.' });
+        }
+        if (!metodePembayaran) {
+            return res.status(400).json({ message: 'metodePembayaran wajib diisi.' });
+        }
+
         const kodeTransaksi = `TRX-${Date.now()}`;
-        let totalSeluruhnya = 0;
+        let totalSeluruhnya  = 0;
         const processedItems = [];
 
+        // --- VALIDASI STOK (sebelum order dibuat) ---
         for (const item of daftarItem) {
             const inventory = await Inventory.findOne({ idItem: item.idItem });
-            if (!inventory || inventory.stockTotal < item.jumlah) {
-                return res.status(400).json({ message: `Stok ${inventory?.namaBarang || item.idItem} tidak cukup.` });
+
+            if (!inventory) {
+                return res.status(404).json({
+                    message: `Item dengan ID ${item.idItem} tidak ditemukan di Inventory.`
+                });
+            }
+            if (Number(inventory.stockTotal) < item.jumlah) {
+                return res.status(400).json({
+                    message: `Stok "${inventory.namaBarang}" tidak cukup. Tersedia: ${inventory.stockTotal}, diminta: ${item.jumlah}.`
+                });
             }
 
-            // --- LOGIKA FIFO DIMULAI ---
-            let jumlahDibutuhkan = item.jumlah;
-            let totalHPPUntukItemIni = 0;
-
-            // Filter mutasi "Masuk" yang masih punya sisa stok (asumsi kita simpan sisa di tiap record mutasi)
-            // Atau kita hitung dari mutasi masuk yang belum ter-offset sepenuhnya.
-            // Cara termudah: Ambil semua mutasi 'Masuk', urutkan berdasarkan tanggal
-            let mutasiMasuk = inventory.mutasi.filter(m => 
-                m.jenisMutasi.toLowerCase().includes('masuk') && (m.jumlahSisa > 0)
-            ).sort((a, b) => a.tanggal - b.tanggal);
-
-            for (let m of mutasiMasuk) {
-                if (jumlahDibutuhkan <= 0) break;
-
-                let diambil = Math.min(m.jumlahSisa, jumlahDibutuhkan);
-                totalHPPUntukItemIni += (diambil * m.HPPItem);
-                m.jumlahSisa -= diambil; // Kurangi jatah di mutasi tersebut
-                jumlahDibutuhkan -= diambil;
-            }
-
-            // Update data Inventory (Stok Total dan array Mutasi yang sudah terpotong jumlahSisa-nya)
-            await inventory.save(); 
-
-            // Tambahkan record mutasi "Keluar" untuk tracking
-            const rataRataHPP = totalHPPUntukItemIni / item.jumlah;
-            
-            await Inventory.findOneAndUpdate(
-                { idItem: item.idItem },
-                { 
-                    $inc: { stockTotal: -item.jumlah },
-                    $push: { 
-                        mutasi: {
-                            tanggal: new Date(),
-                            jenisMutasi: `Penjualan FIFO (${kodeTransaksi})`,
-                            jumlahItem: item.jumlah,
-                            HPPItem: rataRataHPP, // HPP rata-rata dari batch yang terambil
-                            stockAfterUpdate: inventory.stockTotal - item.jumlah
-                        } 
-                    }
-                }
-            );
-            // --- LOGIKA FIFO SELESAI ---
-
-            // Ambil harga jual dari Menu untuk record Order
             const menuData = await Menu.findOne({ id: item.idItem });
+            if (!menuData) {
+                return res.status(404).json({
+                    message: `Menu dengan ID ${item.idItem} tidak ditemukan.`
+                });
+            }
+
             const subtotal = menuData.hargaItem * item.jumlah;
             totalSeluruhnya += subtotal;
 
             processedItems.push({
-                idItem: menuData.id,
-                namaItem: menuData.namaItem,
+                idItem:             menuData.id,
+                namaItem:           menuData.namaItem,
                 hargaSaatTransaksi: menuData.hargaItem,
-                jumlah: item.jumlah,
-                subtotalItem: subtotal,
-                totalHPP: totalHPPUntukItemIni // Berguna untuk laporan laba rugi
+                jumlah:             item.jumlah,
+                subtotalItem:       subtotal,
             });
         }
 
+        // --- SIMPAN ORDER ---
         const orderBaru = await Order.create({
             kodeTransaksi,
-            daftarItem: processedItems,
-            totalBayar: totalSeluruhnya,
+            daftarItem:       processedItems,
+            totalBayar:       totalSeluruhnya,
             metodePembayaran,
-            idKasir: req.user.username 
+            idKasir:          req.user.username,
         });
 
-        res.status(201).json({ message: 'Checkout FIFO Berhasil', orderDetail: orderBaru });
+        // --- PUBLISH KE KAFKA (fire-and-forget, tidak blokir response) ---
+        if (producerReady) {
+            producer.send({
+                topic: process.env.KAFKA_TOPIC || 'transaksi-order',
+                messages: [{
+                    key:   kodeTransaksi,
+                    value: JSON.stringify({ kodeTransaksi, daftarItem }),
+                }],
+            }).catch(err => {
+                // Order sudah tersimpan — log error tapi jangan gagalkan response
+                console.error(`[Order] Gagal publish ke Kafka untuk ${kodeTransaksi}:`, err.message);
+            });
+        } else {
+            console.warn(`[Order] Kafka producer belum siap. Pesan ${kodeTransaksi} tidak terkirim.`);
+        }
+
+        res.status(201).json({
+            message:     'Checkout berhasil. Proses inventory berjalan di background.',
+            orderDetail: orderBaru,
+        });
 
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Internal Server Error' });
+        console.error('[Order] Error saat checkout:', err);
+        res.status(500).json({ message: 'Internal Server Error', error: err.message });
     }
 });
+
+// Tutup producer saat proses berakhir
+process.on('SIGINT',  async () => { await producer.disconnect(); });
+process.on('SIGTERM', async () => { await producer.disconnect(); });
 
 module.exports = router;
