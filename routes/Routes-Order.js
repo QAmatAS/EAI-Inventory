@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const Menu = require('./../models/Model-Menu'); // Import Model Menu
-const Order = require('./../models/Model-Order'); // Import Model Order
+const Product = require('./../models/Model-Product');
+const Inventory = require('./../models/Model-Inventory');
+const Order = require('./../models/Model-Order');
 const { verifyToken, authorize } = require('./../middleware/auth');
 
 router.post('/checkout', verifyToken, authorize(['admin', 'cashier']), async (req, res) => {
@@ -12,39 +13,35 @@ router.post('/checkout', verifyToken, authorize(['admin', 'cashier']), async (re
         const processedItems = [];
 
         for (const item of daftarItem) {
-            const inventory = await Inventory.findOne({ idItem: item.idItem });
+            const inventory = await Inventory.findOne({ idProduct: item.idProduct });
             if (!inventory || inventory.stockTotal < item.jumlah) {
-                return res.status(400).json({ message: `Stok ${inventory?.namaBarang || item.idItem} tidak cukup.` });
+                return res.status(400).json({ 
+                    message: `Stok ${inventory?.namaProduct || item.idProduct} tidak cukup.` 
+                });
             }
 
-            // --- LOGIKA FIFO DIMULAI ---
+            // --- LOGIKA FIFO ---
             let jumlahDibutuhkan = item.jumlah;
             let totalHPPUntukItemIni = 0;
 
-            // Filter mutasi "Masuk" yang masih punya sisa stok (asumsi kita simpan sisa di tiap record mutasi)
-            // Atau kita hitung dari mutasi masuk yang belum ter-offset sepenuhnya.
-            // Cara termudah: Ambil semua mutasi 'Masuk', urutkan berdasarkan tanggal
             let mutasiMasuk = inventory.mutasi.filter(m => 
                 m.jenisMutasi.toLowerCase().includes('masuk') && (m.jumlahSisa > 0)
             ).sort((a, b) => a.tanggal - b.tanggal);
 
             for (let m of mutasiMasuk) {
                 if (jumlahDibutuhkan <= 0) break;
-
                 let diambil = Math.min(m.jumlahSisa, jumlahDibutuhkan);
                 totalHPPUntukItemIni += (diambil * m.HPPItem);
-                m.jumlahSisa -= diambil; // Kurangi jatah di mutasi tersebut
+                m.jumlahSisa -= diambil;
                 jumlahDibutuhkan -= diambil;
             }
 
-            // Update data Inventory (Stok Total dan array Mutasi yang sudah terpotong jumlahSisa-nya)
-            await inventory.save(); 
+            await inventory.save();
 
-            // Tambahkan record mutasi "Keluar" untuk tracking
             const rataRataHPP = totalHPPUntukItemIni / item.jumlah;
-            
+
             await Inventory.findOneAndUpdate(
-                { idItem: item.idItem },
+                { idProduct: item.idProduct },
                 { 
                     $inc: { stockTotal: -item.jumlah },
                     $push: { 
@@ -52,26 +49,25 @@ router.post('/checkout', verifyToken, authorize(['admin', 'cashier']), async (re
                             tanggal: new Date(),
                             jenisMutasi: `Penjualan FIFO (${kodeTransaksi})`,
                             jumlahItem: item.jumlah,
-                            HPPItem: rataRataHPP, // HPP rata-rata dari batch yang terambil
+                            HPPItem: rataRataHPP,
                             stockAfterUpdate: inventory.stockTotal - item.jumlah
                         } 
                     }
                 }
             );
-            // --- LOGIKA FIFO SELESAI ---
+            // --- FIFO SELESAI ---
 
-            // Ambil harga jual dari Menu untuk record Order
-            const menuData = await Menu.findOne({ id: item.idItem });
-            const subtotal = menuData.hargaItem * item.jumlah;
+            const productData = await Product.findOne({ id: item.idProduct });
+            const subtotal = productData.hargaProduct * item.jumlah;
             totalSeluruhnya += subtotal;
 
             processedItems.push({
-                idItem: menuData.id,
-                namaItem: menuData.namaItem,
-                hargaSaatTransaksi: menuData.hargaItem,
+                idProduct: productData.id,
+                namaProduct: productData.namaProduct,
+                hargaSaatTransaksi: productData.hargaProduct,
                 jumlah: item.jumlah,
                 subtotalItem: subtotal,
-                totalHPP: totalHPPUntukItemIni // Berguna untuk laporan laba rugi
+                totalHPP: totalHPPUntukItemIni
             });
         }
 

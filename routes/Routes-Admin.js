@@ -1,163 +1,151 @@
 const express = require('express');
 const router = express.Router();
 
-// Models
-const Menu = require('./../models/Model-Menu');
+const Product = require('./../models/Model-Product');
 const Inventory = require('./../models/Model-Inventory');
-
-// Import middleware di bagian atas file router jika belum
 const { verifyToken, authorize } = require('../middleware/auth');
 
 
-// MENU 
+// ========================
+// PRODUCT ROUTES
+// ========================
 
-router.get('/menu', verifyToken, authorize(['admin', 'cashier']), async (req, res) => {
+// GET semua product
+router.get('/products', verifyToken, authorize(['admin', 'cashier']), async (req, res) => {
     try {
-        // Mengambil semua data dari koleksi Menu
-        const menuItems = await Menu.find({});
-
-        // Log untuk memantau siapa yang mengakses (opsional)
-        console.log(`User ${req.user.username} sedang melihat semua menu.`);
-
-        res.status(200).json(menuItems);
-    }
-    catch (err) {
-        console.error('Error saat mengambil data menu:', err);
+        const products = await Product.find({});
+        console.log(`User ${req.user.username} sedang melihat semua produk.`);
+        res.status(200).json(products);
+    } catch (err) {
+        console.error('Error saat mengambil data produk:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-router.post('/menu', verifyToken, authorize(['admin']), async (req, res) => {
+// POST tambah product baru
+router.post('/products', verifyToken, authorize(['admin']), async (req, res) => {
     try {
         const {
             id,
-            gambarItem,
-            namaItem,
-            hargaItem,
-            jumlahItem,
+            gambarProduct,
+            namaProduct,
+            hargaProduct,
+            stokProduct,
             status
         } = req.body;
 
-        // 1. Validasi: Cek apakah ID sudah digunakan di Menu
-        const existingItem = await Menu.findOne({ id });
-        if (existingItem) {
-            return res.status(409).json({ message: `Gagal! Item dengan ID ${id} sudah ada.` });
+        // Validasi: Cek apakah ID sudah digunakan
+        const existingProduct = await Product.findOne({ id });
+        if (existingProduct) {
+            return res.status(409).json({ message: `Gagal! Produk dengan ID ${id} sudah ada.` });
         }
 
-        // 2. Buat Item Menu Baru
-        const newMenuItem = await Menu.create({
+        // Buat Product baru
+        const newProduct = await Product.create({
             id,
-            gambarItem,
-            namaItem,
-            hargaItem,
-            jumlahItem: jumlahItem || 0,
+            gambarProduct,
+            namaProduct,
+            hargaProduct,
+            stokProduct: stokProduct || 0,
             status: status ?? true
         });
 
-        // 3. INTEGRASI INVENTORY (Sekarang dengan hargaItem)
+        // Integrasi Inventory
         const newInventoryItem = await Inventory.create({
-            idItem: id,
-            namaBarang: namaItem,
-            gambarItem: gambarItem,
-            hargaItem: hargaItem, // Menyimpan harga jual ke dalam inventory
-            stockTotal: (jumlahItem || 0).toString(),
+            idProduct: id,
+            namaProduct: namaProduct,
+            gambarProduct: gambarProduct,
+            hargaProduct: hargaProduct,
+            stockTotal: stokProduct || 0,
             mutasi: [{
                 tanggal: new Date(),
-                jenisMutasi: "Stok Awal (Input Menu Baru)",
-                jumlahItem: jumlahItem || 0,
-                jumlahSisa: jumlahItem || 0,
+                jenisMutasi: "Stok Awal (Produk Baru)",
+                jumlahItem: stokProduct || 0,
+                jumlahSisa: stokProduct || 0,
                 HPPItem: 0,
-                stockAfterUpdate: jumlahItem || 0
+                stockAfterUpdate: stokProduct || 0
             }]
         });
 
-        console.log(`[AUDIT] Admin ${req.user.username} menambahkan menu & inventory: ${namaItem}`);
+        console.log(`[AUDIT] Admin ${req.user.username} menambahkan produk & inventory: ${namaProduct}`);
 
         res.status(201).json({
-            message: 'Item Menu dan Inventory berhasil ditambahkan',
-            menuItem: newMenuItem,
+            message: 'Produk dan Inventory berhasil ditambahkan',
+            product: newProduct,
             inventoryItem: newInventoryItem
         });
-    }
-    catch (err) {
-        console.error('Error saat menambah menu:', err.message);
+    } catch (err) {
+        console.error('Error saat menambah produk:', err.message);
         res.status(500).json({ message: 'Internal Server Error', error: err.message });
     }
 });
 
-router.patch('/menu/:id', async (req, res) => {
+// PATCH update product
+router.patch('/products/:id', verifyToken, authorize(['admin']), async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    // 1. Validasi ID
     if (isNaN(id)) {
         return res.status(400).json({ message: 'ID harus berupa angka.' });
     }
 
-    // 2. Validasi Harga (Jika ada di body)
-    if (updates.hasOwnProperty('hargaItem')) {
-        if (typeof updates.hargaItem !== 'number' || updates.hargaItem < 0) {
+    if (updates.hasOwnProperty('hargaProduct')) {
+        if (typeof updates.hargaProduct !== 'number' || updates.hargaProduct < 0) {
             return res.status(400).json({ message: 'Harga harus berupa angka positif.' });
         }
     }
 
-    // 3. Validasi Status (Jika ada di body)
     if (updates.hasOwnProperty('status') && typeof updates.status !== 'boolean') {
         return res.status(400).json({ message: 'Status harus bernilai true atau false.' });
     }
 
     try {
-        const updatedMenu = await Menu.findOneAndUpdate(
+        const updatedProduct = await Product.findOneAndUpdate(
             { id: parseInt(id) },
             { $set: updates },
             { new: true, runValidators: true }
         );
 
-        if (!updatedMenu) {
-            return res.status(404).json({ message: `Item dengan ID ${id} tidak ditemukan.` });
+        if (!updatedProduct) {
+            return res.status(404).json({ message: `Produk dengan ID ${id} tidak ditemukan.` });
         }
 
-        console.log('data berhasil diubah')
+        console.log(`Produk ID ${id} berhasil diubah.`);
         res.status(200).json({
-            message: 'Data menu berhasil diperbarui',
-            data: updatedMenu
+            message: 'Data produk berhasil diperbarui',
+            data: updatedProduct
         });
-
     } catch (err) {
-        console.error('Error saat update menu:', err);
+        console.error('Error saat update produk:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-router.delete('/menu/:id', async (req, res) => {
+// DELETE product
+router.delete('/products/:id', verifyToken, authorize(['admin']), async (req, res) => {
     const { id } = req.params;
 
-    // 1. Validasi ID (harus angka)
     if (isNaN(id)) {
         return res.status(400).json({ message: 'ID tidak valid. Harus berupa angka.' });
     }
 
     try {
-        // 2. Cari dan Hapus
-        const deletedItem = await Menu.findOneAndDelete({ id: parseInt(id) });
+        const deletedProduct = await Product.findOneAndDelete({ id: parseInt(id) });
 
-        // 3. Cek apakah barangnya memang ada sebelumnya
-        if (!deletedItem) {
+        if (!deletedProduct) {
             return res.status(404).json({ 
-                message: `Gagal menghapus. Item dengan ID ${id} tidak ditemukan.` 
+                message: `Gagal menghapus. Produk dengan ID ${id} tidak ditemukan.` 
             });
         }
 
-        console.log(`Item "${deletedItem.namaItem}" (ID: ${id}) telah dihapus.`);
+        console.log(`Produk "${deletedProduct.namaProduct}" (ID: ${id}) telah dihapus.`);
 
-        // 4. Berikan respon sukses
         res.status(200).json({
-            message: 'Item berhasil dihapus',
-            dataDeleted: deletedItem // Mengirimkan data yang baru saja dihapus sebagai konfirmasi
+            message: 'Produk berhasil dihapus',
+            dataDeleted: deletedProduct
         });
-
     } catch (err) {
-        console.error('Error saat menghapus menu:', err);
+        console.error('Error saat menghapus produk:', err);
         res.status(500).json({ message: 'Internal Server Error' });
     }
 });

@@ -2,10 +2,9 @@ const amqp = require('amqplib');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
-// PENTING: Import kedua model ini agar skema terdaftar di Mongoose
-// Meskipun Menu tidak dipanggil langsung di file ini, 
-// middleware di Model-Inventory membutuhkannya.
-const Menu = require('./models/Model-Menu'); 
+// Import kedua model agar skema terdaftar di Mongoose
+// Model-Product dibutuhkan oleh middleware di Model-Inventory
+const Product = require('./models/Model-Product'); 
 const Inventory = require('./models/Model-Inventory');
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
@@ -15,14 +14,12 @@ const ROUTING_KEY_INVENTORY = "routing_inventory";
 
 async function startSubscriber() {
     try {
-        // Koneksi ke MongoDB
         await mongoose.connect(process.env.MONGODB_URI);
         console.log('Worker connected to MongoDB...');
 
         const connection = await amqp.connect(RABBITMQ_URL);
         const channel = await connection.createChannel();
 
-        // Setup RabbitMQ sesuai konfigurasi server (Topic Exchange)
         await channel.assertExchange(EXCHANGE, 'topic', { durable: true });
         await channel.assertQueue(QUEUE_INVENTORY, { durable: true });
         await channel.bindQueue(QUEUE_INVENTORY, EXCHANGE, ROUTING_KEY_INVENTORY);
@@ -45,10 +42,10 @@ async function startSubscriber() {
 
                 try {
                     for (const item of daftarItem) {
-                        const inventory = await Inventory.findOne({ idItem: item.idItem });
+                        const inventory = await Inventory.findOne({ idProduct: item.idProduct });
                         
                         if (!inventory) {
-                            console.warn(`   - [!] Item ID ${item.idItem} tidak ditemukan.`);
+                            console.warn(`   - [!] Produk ID ${item.idProduct} tidak ditemukan.`);
                             continue;
                         }
 
@@ -69,7 +66,7 @@ async function startSubscriber() {
                         }
 
                         let stokBaru = Number(inventory.stockTotal) - item.jumlah;
-                        inventory.stockTotal = stokBaru.toString();
+                        inventory.stockTotal = stokBaru;
                         
                         inventory.mutasi.push({
                             tanggal: new Date(),
@@ -79,10 +76,10 @@ async function startSubscriber() {
                             stockAfterUpdate: stokBaru
                         });
 
-                        // inventory.save() akan memicu middleware post('save') 
-                        // yang sekarang sudah bisa menemukan model "Menu"
+                        // inventory.save() memicu middleware post('save') 
+                        // yang akan sync ke model Product
                         await inventory.save(); 
-                        console.log(`   - Berhasil update stok: ${inventory.namaBarang}`);
+                        console.log(`   - Berhasil update stok: ${inventory.namaProduct}`);
                     }
                     channel.ack(msg);
                 } catch (err) {

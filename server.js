@@ -5,7 +5,6 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 
 // Routing List
-
 const routeAdmin = require('./routes/Routes-Admin');
 const routeOrder = require('./routes/Routes-Order');
 
@@ -24,19 +23,16 @@ mongoose.connect(MONGODB_URI, {})
     .then(() => console.log('MongoDB connected...'))
     .catch(err => console.log(err));
 
-
 // Routing
 app.use('/Admin', routeAdmin);
 app.use('/Order', routeOrder);
-
 
 // Server Host
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
 
-
-// Tambahkan di bagian paling bawah server.js
+// Spawn worker
 const { spawn } = require('child_process');
 const worker = spawn('node', ['worker.js']);
 
