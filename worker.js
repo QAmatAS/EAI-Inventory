@@ -1,100 +1,63 @@
-const amqp = require('amqplib');
-const mongoose = require('mongoose');
-require('dotenv').config();
+const { Kafka } = require('kafkajs');
+const fs = require('fs');
+const path = require('path');
+// Memastikan dotenv mencari file .env di direktori root proyek
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
-// PENTING: Import kedua model ini agar skema terdaftar di Mongoose
-// Meskipun Menu tidak dipanggil langsung di file ini, 
-// middleware di Model-Inventory membutuhkannya.
-const Menu = require('./models/Model-Menu'); 
-const Inventory = require('./models/Model-Inventory');
+// --- 1. VALIDASI ENV (Sangat Penting) ---
+const requiredEnvs = [
+    'KAFKA_BROKER', 
+    'KAFKA_CA_PATH', 
+    'KAFKA_SERVICE_KEY_PATH', 
+    'KAFKA_SERVICE_CERT_PATH'
+];
 
-const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
-const EXCHANGE = "exchange_utama";
-const QUEUE_INVENTORY = "inventory_updates";
-const ROUTING_KEY_INVENTORY = "routing_inventory";
+requiredEnvs.forEach(envName => {
+    if (!process.env[envName]) {
+        console.error(`[Worker Error]: Variabel ${envName} tidak ditemukan di .env!`);
+        process.exit(1);
+    }
+});
 
-async function startSubscriber() {
+// --- 2. KONFIGURASI KAFKA ---
+const kafka = new Kafka({
+    clientId: process.env.KAFKA_CLIENT_ID || 'marioshop-worker',
+    brokers: [process.env.KAFKA_BROKER],
+    // Tambahkan dua baris ini untuk memberikan waktu lebih lama saat koneksi awal
+    connectionTimeout: 20000,      // Tingkatkan ke 20 detik
+    authenticationTimeout: 20000,  // Tingkatkan ke 20 detik
+    ssl: {
+        rejectUnauthorized: true,
+        ca: [fs.readFileSync(path.resolve(__dirname, process.env.KAFKA_CA_PATH), 'utf-8')],
+        key: fs.readFileSync(path.resolve(__dirname, process.env.KAFKA_SERVICE_KEY_PATH), 'utf-8'),
+        cert: fs.readFileSync(path.resolve(__dirname, process.env.KAFKA_SERVICE_CERT_PATH), 'utf-8'),
+        servername: process.env.KAFKA_BROKER.split(':')[0] 
+    },
+});
+
+const consumer = kafka.consumer({ groupId: process.env.KAFKA_GROUP_ID || 'inventory-group' });
+
+async function startSimpleConsumer() {
     try {
-        // Koneksi ke MongoDB
-        await mongoose.connect(process.env.MONGODB_URI);
-        console.log('Worker connected to MongoDB...');
-
-        const connection = await amqp.connect(RABBITMQ_URL);
-        const channel = await connection.createChannel();
-
-        // Setup RabbitMQ sesuai konfigurasi server (Topic Exchange)
-        await channel.assertExchange(EXCHANGE, 'topic', { durable: true });
-        await channel.assertQueue(QUEUE_INVENTORY, { durable: true });
-        await channel.bindQueue(QUEUE_INVENTORY, EXCHANGE, ROUTING_KEY_INVENTORY);
-
-        channel.prefetch(1);
-        console.log(`[*] Worker aktif. Menunggu pesan di: ${QUEUE_INVENTORY}`);
-
-        channel.consume(QUEUE_INVENTORY, async (msg) => {
-            if (msg !== null) {
-                let transaksi;
-                try {
-                    transaksi = JSON.parse(msg.content.toString());
-                } catch (e) {
-                    console.error('[!] Gagal parse JSON');
-                    return channel.nack(msg, false, false);
-                }
-
-                const { kodeTransaksi, daftarItem } = transaksi;
-                console.log(`[x] Memproses FIFO Transaksi: ${kodeTransaksi}`);
-
-                try {
-                    for (const item of daftarItem) {
-                        const inventory = await Inventory.findOne({ idItem: item.idItem });
-                        
-                        if (!inventory) {
-                            console.warn(`   - [!] Item ID ${item.idItem} tidak ditemukan.`);
-                            continue;
-                        }
-
-                        // Logika FIFO
-                        let jumlahDibutuhkan = item.jumlah;
-                        let totalHPPUntukItemIni = 0;
-
-                        let mutasiMasuk = inventory.mutasi.filter(m => 
-                            m.jenisMutasi.toLowerCase().includes('masuk') && (m.jumlahSisa > 0)
-                        ).sort((a, b) => a.tanggal - b.tanggal);
-
-                        for (let m of mutasiMasuk) {
-                            if (jumlahDibutuhkan <= 0) break;
-                            let diambil = Math.min(m.jumlahSisa, jumlahDibutuhkan);
-                            totalHPPUntukItemIni += (diambil * m.HPPItem);
-                            m.jumlahSisa -= diambil;
-                            jumlahDibutuhkan -= diambil;
-                        }
-
-                        let stokBaru = Number(inventory.stockTotal) - item.jumlah;
-                        inventory.stockTotal = stokBaru.toString();
-                        
-                        inventory.mutasi.push({
-                            tanggal: new Date(),
-                            jenisMutasi: `Penjualan FIFO (${kodeTransaksi})`,
-                            jumlahItem: item.jumlah,
-                            HPPItem: totalHPPUntukItemIni / item.jumlah || 0,
-                            stockAfterUpdate: stokBaru
-                        });
-
-                        // inventory.save() akan memicu middleware post('save') 
-                        // yang sekarang sudah bisa menemukan model "Menu"
-                        await inventory.save(); 
-                        console.log(`   - Berhasil update stok: ${inventory.namaBarang}`);
-                    }
-                    channel.ack(msg);
-                } catch (err) {
-                    console.error('[-] Error DB:', err.message);
-                    channel.nack(msg);
-                }
-            }
+        await consumer.connect();
+        await consumer.subscribe({ 
+            topic: process.env.KAFKA_TOPIC || 'inventory_logs', 
+            fromBeginning: false 
         });
 
+        console.log(`[Worker Log]: Berhasil subscribe ke Topic: ${process.env.KAFKA_TOPIC}`);
+
+        await consumer.run({
+            eachMessage: async ({ topic, partition, message }) => {
+                const payload = message.value.toString();
+                console.log('--- Pesan Diterima ---');
+                console.log(`Payload: ${payload}`);
+                console.log('----------------------');
+            },
+        });
     } catch (error) {
-        console.error('[-] RabbitMQ Connection Error:', error);
+        console.error('[Worker Fatal Error]:', error);
     }
 }
 
-startSubscriber();
+startSimpleConsumer();
